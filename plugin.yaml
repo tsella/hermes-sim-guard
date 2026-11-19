@@ -1,0 +1,84 @@
+name: hermes-sim-guard
+version: 0.1.0
+manifest_version: 2
+description: Continual skill self-improvement via SIM (arXiv:2611.18856) + GUARD (arXiv:2611.23476) with rolling Pre/Post attribution and /hermes-sim-stats telemetry
+author: Hermes User
+license: MIT
+provides_hooks:
+  - pre_llm_call
+  - post_tool_call
+  - post_api_request
+  - post_llm_call
+  - on_session_end
+  - on_skill_lifecycle
+  - pre_background_review
+  - post_background_review
+  - pre_curator_run
+  - post_curator_run
+tags:
+  - self-improvement
+  - skills
+  - telemetry
+  - sim
+  - guard
+config_schema:
+  mode:
+    type: str
+    default: augment+gate
+    description: "Execution mode: 'augment+gate' (augment warm-cache review + post-hoc Soft-HURT gate) or 'override' (skip built-in skill review for full M>=2 ContrastEvolve + Soft-HURT loop)"
+  pool_size:
+    type: int
+    default: 2
+    description: "GUARD candidate pool size M (>=2) in override mode"
+  beta_hurt:
+    type: float
+    default: 3.5
+    description: "GUARD fitness penalty weight beta on hurt tasks (beta > gamma >= 0)"
+  gamma_help:
+    type: float
+    default: 1.5
+    description: "GUARD fitness reward weight gamma on helped tasks"
+  delta_noise:
+    type: float
+    default: 2.0
+    description: "GUARD single-task score noise floor delta_noise"
+  delta_contrast:
+    type: float
+    default: 10.0
+    description: "GUARD minimum continuous score spread delta_con for trajectory contrasts"
+  h_max:
+    type: int
+    default: 1
+    description: "Soft-HURT maximum tolerated hurt tasks h_max"
+  h_rep:
+    type: int
+    default: 2
+    description: "Soft-HURT maximum hurt tasks eligible for one in-round [iff] repair"
+  mu_min:
+    type: float
+    default: 2.5
+    description: "Soft-HURT minimum net gain margin mu_min when any task regresses"
+  playbook_max_chars:
+    type: int
+    default: 2600
+    description: "GUARD skill body character budget B_W"
+  rejection_ledger_window:
+    type: int
+    default: 12
+    description: "Active deduplicated rejection ledger window L_max rendered into prompts"
+  attribution_window:
+    type: int
+    default: 20
+    description: "Default rolling Pre/Post attribution window W (eligible turns before/after edit)"
+  enable_llm_review:
+    type: bool
+    default: true
+    description: "Enable Layer-2 semantic self-review via sim_reviewer auxiliary slot (falls back to Layer-1 when false or unavailable)"
+  auto_rollback:
+    type: bool
+    default: true
+    description: "Automatically roll back skill edits rejected by the Soft-HURT gate via skill_ledger"
+  checklist_min_tool_calls:
+    type: int
+    default: 1
+    description: "Minimum tool calls (or loaded skill) required to trigger pre-execution checklist + Layer-2 grading"
