@@ -27,11 +27,14 @@ from guard_propose_gate import (
     RejectionLedger,
     StrategyPoolStore,
     check_soft_hurt_gate,
+    critic_score_candidates,
+    effective_size_ceiling,
     evaluate_candidate_metrics,
     run_override_evolution_round,
 )
 from guard_regret import build_regret_bundle
 from reporter import handle_slash_command
+from runtime import SimGuardRuntime
 from sim_memory import SimMemoryStore
 from telemetry import TelemetryStore, compute_rolling_attribution
 
@@ -289,6 +292,104 @@ def test_five_core_metrics_rolling_attribution_and_slash_report(tmp_path):
     json_out = handle_slash_command("summary --format json", default_data_dir=tmp_path)
     parsed = json.loads(json_out)
     assert len(parsed["metrics"]) == 5
+
+
+def test_cache_ratio_denominator_and_full_prompt_tokens(tmp_path):
+    """Hermes reports input_tokens as NON-cached prompt tokens; cache_read_ratio must stay in
+    [0, 1] using full prompt_tokens (uncached + cache_read + cache_write), and total_tokens
+    must reflect the full prompt + output."""
+    fake_ctx = SimpleNamespace(
+        state=SimpleNamespace(data_dir=tmp_path),
+        get_config=lambda key, default=None: False if key == "enable_llm_review" else default,
+        llm=None,
+    )
+    rt = SimGuardRuntime(fake_ctx)
+    rt.on_pre_llm_call(session_id="s-cache", user_message="run check", model="claude-sonnet-4-6", platform="cli")
+    # Heavy cache-hit turn with cache_read >> uncached input + cache_write (previously produced >100x ratio).
+    rt.on_post_api_request(
+        session_id="s-cache",
+        usage={
+            "input_tokens": 100,
+            "cache_read_tokens": 8000,
+            "cache_write_tokens": 1900,
+            "prompt_tokens": 10000,
+            "output_tokens": 250,
+        },
+        model="claude-sonnet-4-6",
+    )
+    rt.on_post_llm_call(
+        session_id="s-cache",
+        user_message="run check",
+        assistant_response="All good.",
+        model="claude-sonnet-4-6",
+        platform="cli",
+    )
+
+    events = TelemetryStore(tmp_path / "telemetry.jsonl").read_events(event_type="turn_graded")
+    assert len(events) == 1
+    ev = events[0]
+    assert ev["prompt_tokens"] == 10000
+    assert ev["total_tokens"] == 10250
+    assert ev["cache_write_tokens"] == 1900
+    assert ev["cache_read_ratio"] == 0.8
+
+
+def test_large_incumbent_size_ceiling_fallback_and_llm_critic_preview():
+    """Skills already larger than playbook_max_chars use incumbent * 1.15 as their ceiling in
+    both the deterministic fallback and the LLM critic preview window."""
+    cfg = SimGuardConfig(playbook_max_chars=2600, enable_llm_review=False)
+    incumbent = "# Big Skill\n" + ("rule line\n" * 400)  # ~4012 chars > 2600
+    ceiling = effective_size_ceiling(incumbent, cfg.playbook_max_chars)
+    assert ceiling == int(len(incumbent.strip()) * 1.15)
+
+    # Scoped edit within +15% promotes under deterministic fallback; bloated +30% edit fails.
+    good_edit = incumbent + "\n[iff prod] verify migrations.\n"
+    bloated_edit = incumbent + ("\nAlways check extra stuff." * 120)
+    inc_s, cand_lists = critic_score_candidates(
+        llm=None,
+        skill_name="big-skill",
+        incumbent_content=incumbent,
+        candidate_contents=[good_edit, bloated_edit],
+        episodes=[{"score": 75.0, "strict_score": 37.5}],
+        cfg=cfg,
+    )
+    m_good = evaluate_candidate_metrics(
+        incumbent_scores=inc_s, candidate_scores=cand_lists[0], delta_noise=2.0, beta_hurt=3.5, gamma_help=1.5,
+    )
+    m_bloat = evaluate_candidate_metrics(
+        incumbent_scores=inc_s, candidate_scores=cand_lists[1], delta_noise=2.0, beta_hurt=3.5, gamma_help=1.5,
+    )
+    assert check_soft_hurt_gate(
+        net_gain=m_good["net_gain"], hurt_penalty=m_good["hurt_penalty"],
+        helped_count=len(m_good["helped"]), hurt_count=len(m_good["hurt"]), h_max=1, mu_min=2.5,
+    ).promoted is True
+    assert check_soft_hurt_gate(
+        net_gain=m_bloat["net_gain"], hurt_penalty=m_bloat["hurt_penalty"],
+        helped_count=len(m_bloat["helped"]), hurt_count=len(m_bloat["hurt"]), h_max=1, mu_min=2.5,
+    ).promoted is False
+
+    # LLM critic receives the tail of a large incumbent instead of truncating at playbook_max_chars + 400.
+    seen_payloads: list[dict] = []
+
+    class _CaptureLlm:
+        def complete_structured(self, *, input, **_kw):
+            seen_payloads.append(json.loads(input[0]["text"]))
+            return SimpleNamespace(parsed={
+                "incumbent_scores": [{"episode": 0, "score": 75.0, "strict": 37.5}],
+                "candidates": [{"index": 0, "scores": [{"episode": 0, "score": 85.0, "strict": 42.5}]}],
+            })
+
+    critic_score_candidates(
+        llm=_CaptureLlm(),
+        skill_name="big-skill",
+        incumbent_content=incumbent,
+        candidate_contents=[good_edit],
+        episodes=[{"score": 75.0, "strict_score": 37.5}],
+        cfg=SimGuardConfig(playbook_max_chars=2600, enable_llm_review=True),
+    )
+    assert len(seen_payloads) == 1
+    assert seen_payloads[0]["playbook_max_chars"] == ceiling
+    assert "[iff prod] verify migrations." in seen_payloads[0]["candidates"][0]["content"]
 
 
 def test_plugin_real_discovery_hooks_and_slash_command(tmp_path, monkeypatch):

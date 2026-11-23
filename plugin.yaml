@@ -1,5 +1,5 @@
 name: hermes-sim-guard
-version: 0.1.1
+version: 0.1.2
 manifest_version: 2
 description: Continual skill self-improvement via SIM (arXiv:2611.18856) + GUARD (arXiv:2611.23476) with rolling Pre/Post attribution and /hermes-sim-stats telemetry
 author: Hermes User

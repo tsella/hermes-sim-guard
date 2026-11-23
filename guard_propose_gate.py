@@ -377,6 +377,15 @@ class StrategyPoolStore:
         return next_pool
 
 
+_CRITIC_MAX_PREVIEW_CHARS = 16000
+
+
+def effective_size_ceiling(incumbent_content: str, playbook_max_chars: int) -> int:
+    """Size budget judged relative to the incumbent so legitimately large skills can still evolve."""
+    incumbent_size = len((incumbent_content or "").strip())
+    return max(int(playbook_max_chars), int(incumbent_size * 1.15))
+
+
 def critic_score_candidates(
     *,
     llm: Any,
@@ -393,14 +402,17 @@ def critic_score_candidates(
     if not episodes:
         episodes = [{"episode": 0, "summary": "baseline skill usage", "score": 75.0, "strict": 50.0}]
 
+    size_ceiling = effective_size_ceiling(incumbent_content, cfg.playbook_max_chars)
+    preview_cap = min(size_ceiling + 400, _CRITIC_MAX_PREVIEW_CHARS)
+
     if llm is not None and cfg.enable_llm_review:
         try:
             payload = json.dumps({
                 "skill_name": skill_name,
-                "playbook_max_chars": cfg.playbook_max_chars,
-                "incumbent": incumbent_content[: cfg.playbook_max_chars + 400],
+                "playbook_max_chars": size_ceiling,
+                "incumbent": incumbent_content[:preview_cap],
                 "candidates": [
-                    {"index": idx, "content": text[: cfg.playbook_max_chars + 400]}
+                    {"index": idx, "content": text[:preview_cap]}
                     for idx, text in enumerate(candidate_contents)
                 ],
                 "episodes": [
@@ -442,13 +454,9 @@ def critic_score_candidates(
         for i, ep in enumerate(episodes[:8])
     ]
     cand_lists: list[list[dict[str, float]]] = []
-    incumbent_size = len((incumbent_content or "").strip())
     for text in candidate_contents:
         body = (text or "").strip()
         scoped = "[iff" in body.lower() or "when " in body.lower()
-        # Size is judged against the incumbent, not against an absolute budget: a profile whose
-        # skills legitimately run past playbook_max_chars would otherwise never promote an edit.
-        size_ceiling = max(cfg.playbook_max_chars, int(incumbent_size * 1.15))
         within_budget = 0 < len(body) <= size_ceiling
         delta = (4.0 if scoped else -3.0) + (2.0 if within_budget else -6.0)
         if body == (incumbent_content or "").strip():
@@ -477,6 +485,7 @@ def run_override_evolution_round(
 ) -> dict[str, Any]:
     """Execute one GUARD Algorithm 1 Propose + ContrastEvolve + Soft-HURT Gate round."""
     prompts = strategy_pool.get_prompts(skill_name, cfg.pool_size)
+    size_ceiling = effective_size_ceiling(incumbent_content, cfg.playbook_max_chars)
     raw_candidates: list[dict[str, Any]] = []
     for idx, strat_prompt in enumerate(prompts):
         cand = _distill_candidate(
@@ -486,7 +495,7 @@ def run_override_evolution_round(
             incumbent_content=incumbent_content,
             regret_block=regret_prompt_block,
             sim_block=sim_prompt_block,
-            max_chars=cfg.playbook_max_chars,
+            max_chars=size_ceiling,
             temperature=0.65 if idx == 0 else 0.8,
         )
         if cand is not None:
@@ -559,7 +568,7 @@ def run_override_evolution_round(
             candidate_content=winner.skill_content,
             hurt_episodes=list(winner.hurt_episodes),
             episodes=episodes,
-            max_chars=cfg.playbook_max_chars,
+            max_chars=size_ceiling,
         )
         if repaired is not None:
             r_inc, r_cands = critic_score_candidates(

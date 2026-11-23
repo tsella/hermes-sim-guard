@@ -58,8 +58,10 @@ class _TurnAccumulator:
     skills_loaded: list[str] = field(default_factory=list)
     pre_checklist: list[ChecklistCriterion] = field(default_factory=list)
     input_tokens: int = 0
+    prompt_tokens: int = 0
     output_tokens: int = 0
     cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     api_calls: int = 0
 
 
@@ -183,9 +185,18 @@ class SimGuardRuntime:
         u = usage if isinstance(usage, dict) else {}
         with self._lock:
             acc.api_calls += 1
-            acc.input_tokens += int(u.get("input_tokens") or u.get("prompt_tokens") or 0)
+            uncached_in = int(u.get("input_tokens") or 0)
+            cache_read = int(u.get("cache_read_tokens") or u.get("cache_read_input_tokens") or 0)
+            cache_write = int(u.get("cache_write_tokens") or u.get("cache_creation_input_tokens") or 0)
+            raw_prompt = int(u.get("prompt_tokens") or 0)
+            # Hermes's turn_usage.py reports input_tokens as NON-cached prompt tokens while
+            # prompt_tokens carries the full prompt (uncached + cache_read + cache_write).
+            full_prompt = max(raw_prompt, uncached_in + cache_read + cache_write)
+            acc.input_tokens += uncached_in
+            acc.prompt_tokens += full_prompt
             acc.output_tokens += int(u.get("output_tokens") or u.get("completion_tokens") or 0)
-            acc.cache_read_tokens += int(u.get("cache_read_tokens") or u.get("cache_read_input_tokens") or 0)
+            acc.cache_read_tokens += cache_read
+            acc.cache_write_tokens += cache_write
             if model and not acc.model:
                 acc.model = str(model)
 
@@ -238,12 +249,9 @@ class SimGuardRuntime:
             delta_con=cfg.delta_contrast,
         )
 
-        total_tokens = acc.input_tokens + acc.output_tokens
-        # Hermes reports input_tokens as NON-cached prompt tokens, so the cached share of the
-        # prompt is cache_read / (input + cache_read). Dividing by input alone reports ratios
-        # far above 1 (observed up to 872x).
-        prompt_total = acc.input_tokens + acc.cache_read_tokens
-        cache_ratio = (acc.cache_read_tokens / prompt_total) if prompt_total > 0 else None
+        prompt_total = max(acc.prompt_tokens, acc.input_tokens + acc.cache_read_tokens + acc.cache_write_tokens)
+        total_tokens = prompt_total + acc.output_tokens
+        cache_ratio = min(1.0, acc.cache_read_tokens / prompt_total) if prompt_total > 0 else None
         telemetry.append(
             "turn_graded",
             {
@@ -254,9 +262,11 @@ class SimGuardRuntime:
                 "tool_iterations": tool_count,
                 "api_calls": acc.api_calls,
                 "total_tokens": total_tokens if total_tokens > 0 else None,
+                "prompt_tokens": prompt_total,
                 "input_tokens": acc.input_tokens,
                 "output_tokens": acc.output_tokens,
                 "cache_read_tokens": acc.cache_read_tokens,
+                "cache_write_tokens": acc.cache_write_tokens,
                 "cache_read_ratio": round(cache_ratio, 4) if cache_ratio is not None else None,
                 "mean_delta_hurt": round(bundle.mean_delta_hurt, 4),
                 "mean_delta_gap": round(bundle.mean_delta_gap, 4),
@@ -300,7 +310,9 @@ class SimGuardRuntime:
             llm=None,
             enable_llm=False,
         )
-        total_tokens = acc.input_tokens + acc.output_tokens
+        prompt_total = max(acc.prompt_tokens, acc.input_tokens + acc.cache_read_tokens + acc.cache_write_tokens)
+        total_tokens = prompt_total + acc.output_tokens
+        cache_ratio = min(1.0, acc.cache_read_tokens / prompt_total) if prompt_total > 0 else None
         telemetry.append(
             "turn_graded",
             {
@@ -311,6 +323,12 @@ class SimGuardRuntime:
                 "tool_iterations": len(acc.tool_trace),
                 "api_calls": acc.api_calls,
                 "total_tokens": total_tokens if total_tokens > 0 else None,
+                "prompt_tokens": prompt_total,
+                "input_tokens": acc.input_tokens,
+                "output_tokens": acc.output_tokens,
+                "cache_read_tokens": acc.cache_read_tokens,
+                "cache_write_tokens": acc.cache_write_tokens,
+                "cache_read_ratio": round(cache_ratio, 4) if cache_ratio is not None else None,
                 "failed": bool(failed),
                 "interrupted": bool(interrupted),
                 **grade.to_dict(),
