@@ -239,7 +239,11 @@ class SimGuardRuntime:
         )
 
         total_tokens = acc.input_tokens + acc.output_tokens
-        cache_ratio = (acc.cache_read_tokens / acc.input_tokens) if acc.input_tokens > 0 else None
+        # Hermes reports input_tokens as NON-cached prompt tokens, so the cached share of the
+        # prompt is cache_read / (input + cache_read). Dividing by input alone reports ratios
+        # far above 1 (observed up to 872x).
+        prompt_total = acc.input_tokens + acc.cache_read_tokens
+        cache_ratio = (acc.cache_read_tokens / prompt_total) if prompt_total > 0 else None
         telemetry.append(
             "turn_graded",
             {

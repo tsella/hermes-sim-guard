@@ -442,10 +442,14 @@ def critic_score_candidates(
         for i, ep in enumerate(episodes[:8])
     ]
     cand_lists: list[list[dict[str, float]]] = []
+    incumbent_size = len((incumbent_content or "").strip())
     for text in candidate_contents:
         body = (text or "").strip()
         scoped = "[iff" in body.lower() or "when " in body.lower()
-        within_budget = 0 < len(body) <= cfg.playbook_max_chars
+        # Size is judged against the incumbent, not against an absolute budget: a profile whose
+        # skills legitimately run past playbook_max_chars would otherwise never promote an edit.
+        size_ceiling = max(cfg.playbook_max_chars, int(incumbent_size * 1.15))
+        within_budget = 0 < len(body) <= size_ceiling
         delta = (4.0 if scoped else -3.0) + (2.0 if within_budget else -6.0)
         if body == (incumbent_content or "").strip():
             delta = 0.0
